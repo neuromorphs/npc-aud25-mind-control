@@ -287,6 +287,7 @@ while running:
 
                 alpha_summary["threshold"] = threshold
                 print(f"✅ Alpha threshold set to: {alpha_summary['threshold']:.2f}")
+                exit()
 
 
     elif screen_state == "done_calibration":

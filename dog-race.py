@@ -5,6 +5,9 @@ import numpy as np
 from pylsl import StreamInlet, resolve_byprop, StreamInfo, StreamOutlet, local_clock
 from scipy.signal import firwin, lfilter, lfilter_zi, welch
 from enum import Enum
+from scipy.signal import butter, filtfilt
+
+import sys
 
 class State(Enum):
     BACKWARD = 1
@@ -17,23 +20,19 @@ ser = serial.Serial('/dev/rfcomm0', 115200)
 
 
 # === Compute band power ===
-def compute_band_power(epoch, band, fs):
+def compute_band_power(epoch, band, fs, order=4):
     epoch = np.atleast_2d(epoch)
     if epoch.shape[0] < epoch.shape[1]:
-        epoch = epoch.T
+        epoch = epoch.T  # Ensure shape is (samples, channels)
+    
+    nyq = 0.5 * fs
+    low, high = band[0] / nyq, band[1] / nyq
+    b, a = butter(order, [low, high], btype='band')
+    filtered = filtfilt(b, a, epoch, axis=0)
 
-    fmin, fmax = band
-    psd, freqs = welch(epoch, fs=fs, nperseg=fs*2, axis=0)
-    freqs = np.squeeze(freqs)
-    if freqs.ndim > 1:
-        freqs = freqs[:, 0]
+    power = np.mean(filtered ** 2, axis=0)  # mean power per channel
+    return power
 
-    idx_band = (freqs >= fmin) & (freqs <= fmax)
-
-    if psd.ndim == 1:
-        return np.sum(psd[idx_band])
-    else:
-        return np.sum(psd[idx_band, :], axis=0)
 
 # === Parameters ===
 fs = 256
@@ -66,14 +65,16 @@ last_feedback_time = time.time()
 alpha_window = []
 current_alpha = None
 
-def state_change(alpha_power, band_lower=60, band_upper=80):
-    if alpha_power <= band_lower:
+alpha_threshold = float(sys.argv[1])
+
+#def state_change(alpha_power, band_lower=60, band_upper=80):
+def state_change(alpha_power, threshold):
+    if alpha_power <= threshold:
         return State.BACKWARD
-    elif alpha_power >= band_upper:
+    elif alpha_power >= threshold:
         return State.FORWARD
     else:
         return State.STAY
-
 
 while True:
     samples, _ = eeg_inlet.pull_chunk(timeout=0.0, max_samples=fs)
@@ -90,12 +91,20 @@ while True:
             all_channels = feedback_array[:, :]
             if np.std(all_channels) > 5:
                 alpha_power = compute_band_power(all_channels, band_defs["Alpha"], fs).mean()
-                alpha_window.append(alpha_power)
+
+                alpha = compute_band_power(all_channels, band_defs["Alpha"], fs)
+                theta = compute_band_power(all_channels, band_defs["Theta"], fs)
+                beta  = compute_band_power(all_channels, band_defs["Beta"], fs)
+                ratio = alpha / (theta * beta)
+                alpha_window.append(ratio.mean())
+
+
+#                alpha_window.append(alpha_power)
                 if len(alpha_window) > 5:
                     alpha_window.pop(0)
                 current_alpha = np.mean(alpha_window)
 
-                next_state = state_change(current_alpha)
+                next_state = state_change(current_alpha, alpha_threshold)
                 if current_state != next_state:
                     current_state = next_state
                     print(f'Writing to serial {current_state}, {current_alpha} \r')
